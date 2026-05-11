@@ -2,9 +2,13 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'ap-south-1'
-        CLUSTER_NAME = 'demo-eks-cluster'
+        AWS_REGION     = 'ap-south-1'
+        CLUSTER_NAME   = 'demo-eks-cluster'
         NODEGROUP_NAME = 'demo-nodegroup'
+    }
+
+    options {
+        timeout(time: 90, unit: 'MINUTES')
     }
 
     stages {
@@ -12,6 +16,8 @@ pipeline {
         stage('Check Tools') {
             steps {
                 sh '''
+                echo "Checking required tools..."
+
                 eksctl version
                 kubectl version --client
                 aws --version
@@ -22,6 +28,8 @@ pipeline {
         stage('Create EKS Cluster') {
             steps {
                 sh '''
+                echo "Creating EKS Cluster..."
+
                 eksctl create cluster \
                   --name $CLUSTER_NAME \
                   --region $AWS_REGION \
@@ -32,7 +40,7 @@ pipeline {
                   --nodes-max 1 \
                   --managed \
                   --with-oidc \
-                  --ssh-access \
+                  --ssh-access=false \
                   --alb-ingress-access \
                   --external-dns-access \
                   --full-ecr-access \
@@ -42,21 +50,33 @@ pipeline {
             }
         }
 
-        stage('Verify Cluster') {
+        stage('Update kubeconfig') {
             steps {
                 sh '''
+                echo "Updating kubeconfig..."
+
                 aws eks update-kubeconfig \
                   --region $AWS_REGION \
                   --name $CLUSTER_NAME
-
-                kubectl get nodes
                 '''
             }
         }
 
-        stage('Deploy Pod') {
+        stage('Verify Cluster') {
             steps {
                 sh '''
+                echo "Checking cluster nodes..."
+
+                kubectl get nodes -o wide
+                '''
+            }
+        }
+
+        stage('Deploy Nginx Pod') {
+            steps {
+                sh '''
+                echo "Deploying Nginx Pod..."
+
                 cat <<EOF > pod.yaml
 apiVersion: v1
 kind: Pod
@@ -71,19 +91,29 @@ spec:
 EOF
 
                 kubectl apply -f pod.yaml
-                kubectl get pods
+
+                echo "Waiting for pod to become Ready..."
+
+                kubectl wait --for=condition=Ready pod/nginx-pod --timeout=180s
+
+                kubectl get pods -o wide
                 '''
             }
         }
     }
 
     post {
+
         success {
-            echo 'EKS Cluster and Pod Created Successfully'
+            echo 'EKS Cluster and Nginx Pod Created Successfully'
         }
 
         failure {
             echo 'Pipeline Failed'
+        }
+
+        always {
+            cleanWs()
         }
     }
 }
