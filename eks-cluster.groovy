@@ -2,114 +2,68 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION     = 'ap-south-1'
-        CLUSTER_NAME   = 'demo-eks-cluster'
-        NODEGROUP_NAME = 'demo-nodegroup'
-    }
-
-    options {
-        timeout(time: 90, unit: 'MINUTES')
+        AWS_REGION   = 'ap-south-1'
+        CLUSTER_NAME = 'demo-eks-cluster'
     }
 
     stages {
 
-        stage('Check Tools') {
+        stage('Delete Existing EKS Cluster') {
             steps {
                 sh '''
-                echo "Checking required tools..."
+                echo "Deleting old EKS cluster if exists..."
 
-                eksctl version
-                kubectl version --client
-                aws --version
-                '''
-            }
-        }
-
-        stage('Create EKS Cluster') {
-            steps {
-                sh '''
-                echo "Creating EKS Cluster..."
-
-                eksctl create cluster \
+                eksctl delete cluster \
                   --name $CLUSTER_NAME \
-                  --region $AWS_REGION \
-                  --nodegroup-name $NODEGROUP_NAME \
-                  --node-type t3.medium \
-                  --nodes 1 \
-                  --nodes-min 1 \
-                  --nodes-max 1 \
-                  --managed \
-                  --with-oidc \
-                  --ssh-access=false \
-                  --alb-ingress-access \
-                  --external-dns-access \
-                  --full-ecr-access \
-                  --asg-access \
-                  --node-private-networking=false
+                  --region $AWS_REGION || true
                 '''
             }
         }
 
-        stage('Update kubeconfig') {
+        stage('Delete Remaining CloudFormation Stack') {
             steps {
                 sh '''
-                echo "Updating kubeconfig..."
+                echo "Deleting leftover CloudFormation stack..."
 
-                aws eks update-kubeconfig \
-                  --region $AWS_REGION \
-                  --name $CLUSTER_NAME
+                aws cloudformation delete-stack \
+                  --stack-name eksctl-demo-eks-cluster-cluster \
+                  --region $AWS_REGION || true
                 '''
             }
         }
 
-        stage('Verify Cluster') {
+        stage('Wait for Stack Deletion') {
             steps {
                 sh '''
-                echo "Checking cluster nodes..."
+                echo "Waiting for stack deletion..."
 
-                kubectl get nodes -o wide
+                aws cloudformation wait stack-delete-complete \
+                  --stack-name eksctl-demo-eks-cluster-cluster \
+                  --region $AWS_REGION || true
                 '''
             }
         }
 
-        stage('Deploy Nginx Pod') {
+        stage('Verify Cleanup') {
             steps {
                 sh '''
-                echo "Deploying Nginx Pod..."
+                echo "Checking remaining stacks..."
 
-                cat <<EOF > pod.yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: nginx-pod
-spec:
-  containers:
-  - name: nginx
-    image: nginx
-    ports:
-    - containerPort: 80
-EOF
-
-                kubectl apply -f pod.yaml
-
-                echo "Waiting for pod to become Ready..."
-
-                kubectl wait --for=condition=Ready pod/nginx-pod --timeout=180s
-
-                kubectl get pods -o wide
+                aws cloudformation list-stacks \
+                  --stack-status-filter CREATE_COMPLETE DELETE_FAILED CREATE_FAILED ROLLBACK_COMPLETE \
+                  --region $AWS_REGION
                 '''
             }
         }
     }
 
     post {
-
         success {
-            echo 'EKS Cluster and Nginx Pod Created Successfully'
+            echo 'Old EKS resources cleaned successfully'
         }
 
         failure {
-            echo 'Pipeline Failed'
+            echo 'Cleanup Pipeline Failed'
         }
 
         always {
